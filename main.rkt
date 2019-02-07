@@ -1,13 +1,14 @@
 #lang racket/base
 
 (require
-  syntax/apply-transformer
+  racket/promise
   racket/syntax
+  syntax/apply-transformer
   syntax/parse
   (for-syntax
    racket/base
-   syntax/parse
    racket/syntax
+   syntax/parse
    syntax/transformer)
   (for-template racket/base))
 
@@ -248,11 +249,13 @@
 ; Syntax generics. eventually syntax/generic?
 
 (begin-for-syntax
-  (struct syntax-generic-info [prop func]
+  (struct syntax-generic-info [prop func stxclass]
     #:property prop:procedure
     (lambda (s stx)
       ((set!-transformer-procedure
-        (make-variable-like-transformer (syntax-generic-info-func s))) stx))))
+        (make-variable-like-transformer (syntax-generic-info-func s))) stx))
+    #:property prop:syntax-class
+    (lambda (s) (syntax-generic-info-stxclass s))))
 
 (define (dispatch-on-head stx)
   (syntax-case stx ()
@@ -299,6 +302,10 @@
 (define ((expand-to-error name) stx . rest)
   (raise-syntax-error #f (format "not a ~a" name) stx))
 
+(define (check-scope-or-false who sc)
+  (unless (or (not sc) (scope? sc))
+    (raise-argument-error who "(or/c scope? #f)" sc)))
+
 (define-syntax define-syntax-generic
   (syntax-parser
     [(_ gen-name:id
@@ -306,11 +313,28 @@
                    #:defaults ([fallback-proc #'(expand-to-error 'gen-name)]))
         (~optional (~seq #:dispatch-on dispatch-on-e:expr)
                    #:defaults ([dispatch-on-e #'dispatch-on-head])))
-     (with-syntax ([gen-name? (format-id #'gen-name "~a?" #'gen-name)])
-       #'(begin
-           (define-values (prop func gen-name?)
-             (make-generic 'gen-name 'gen-name? dispatch-on-e fallback-proc))
-           (define-syntax gen-name (syntax-generic-info (quote-syntax prop) (quote-syntax func)))))]))
+     #:do [(define gen-name-str (symbol->string (syntax-e #'gen-name)))]
+     #:with gen-name? (let ([gen-name-len (string-length gen-name-str)]
+                            [gen-name?-id (format-id #'gen-name "~a?" #'gen-name)])
+                        (syntax-property gen-name?-id 'sub-range-binders
+                                         (vector (syntax-local-introduce gen-name?-id)
+                                                 0 gen-name-len 0.5 0.5
+                                                 (syntax-local-introduce #'gen-name)
+                                                 0 gen-name-len 0.5 0.5)))
+     #:with gen-class (generate-temporary #'gen-name)
+     #`(begin
+         (define-values (prop func gen-name?)
+           (make-generic 'gen-name 'gen-name? dispatch-on-e fallback-proc))
+         (define-syntax-class (gen-class [sc #f] #:lazy? [lazy? #f] . args)
+           #:description '#,gen-name-str
+           #:commit
+           #:attributes [value]
+           [pattern x
+                    #:do [(check-scope-or-false 'gen-name sc)]
+                    #:when (gen-name? #'x sc)
+                    #:do [(define (do-dispatch) (apply apply-as-transformer func sc #'x args))]
+                    #:attr value (if lazy? (delay (do-dispatch)) (do-dispatch))])
+         (define-syntax gen-name (syntax-generic-info #'prop #'func #'gen-class)))]))
 
 (define (not-an-expression stx)
   (raise-syntax-error #f "not an expression" stx))
