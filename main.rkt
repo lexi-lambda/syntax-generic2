@@ -9,6 +9,7 @@
    racket/base
    racket/syntax
    syntax/parse
+   syntax/parse/experimental/eh
    syntax/transformer)
   (for-template racket/base))
 
@@ -366,21 +367,37 @@
                                    (cons gen-prop (lambda (st) func)) ...
                                    (cons prop prop-val) ...)))]))
 
+(begin-for-syntax
+  (define-eh-alternative-set stxparse-option
+    [pattern (~optional (~seq #:context ~! context-e:expr))]
+    [pattern (~optional (~seq #:literals ~! [literal ...]))]
+    [pattern (~optional (~seq #:datum-literals ~! [datum-literal ...]))]
+    [pattern (~optional (~seq #:literal-sets ~! [literal-set ...]))]
+    [pattern (~optional (~and #:track-literals track-literals))]
+    [pattern (~optional (~seq #:conventions ~! [convention:id ...]))]
+    [pattern (~optional (~seq #:local-conventions ~! [local-convention ...]))]
+    [pattern (~optional (~and #:disable-colon-notation disable-colon-notation))]))
+
 (define-syntax generics/parse
   (syntax-parser
-    [(_ (name:id pat ...)
-        [(method:id args:id ...)
-         body body* ...] ...)
-     ; This trick with the syntax class means that all the pattern
-     ; bindings get their hygiene from `name`, rather than their
-     ; original syntax.
-     #:with empty (datum->syntax #'name '||)
-     #'(let ()
-         (define-syntax-class cls
-           (pattern (name pat ...)))
-         (generics
-          [method (lambda (stx args ...)
-                    (syntax-parse stx
-                      [(~var empty cls)
-                       body body* ...]))]
-          ...))]))
+    [(_ (~alt (~eh-var parse-opt stxparse-option)) ...
+        pat
+        (~and clause [(method:id arg:id ...) body ...+]) ...)
+     #:attr context-id (and (attribute parse-opt.context-e) #'context)
+     #:with [method-proc ...] (for/list ([clause (in-list (attribute clause))]
+                                         [args (in-list (attribute arg))]
+                                         [bodies (in-list (attribute body))])
+                                (quasisyntax/loc clause
+                                  (lambda (stx #,@args)
+                                    (syntax-parse stx
+                                      (~? (~@ #:context context-id))
+                                      (~? (~@ #:literals [parse-opt.literal ...]))
+                                      (~? (~@ #:datum-literals [parse-opt.datum-literal ...]))
+                                      (~? (~@ #:literal-sets [parse-opt.literal-set ...]))
+                                      (~? parse-opt.track-literals)
+                                      (~? (~@ #:conventions [parse-opt.convention ...]))
+                                      (~? (~@ #:local-conventions [parse-opt.local-convention ...]))
+                                      (~? parse-opt.disable-colon-notation)
+                                      [pat #,@bodies]))))
+     #'(let ((~? [context-id parse-opt.context-e]))
+         (generics [method method-proc] ...))]))
